@@ -155,6 +155,11 @@ python run_experiment.py --use-llm --llm-sample-rate 0.05 --population-size 300 
 | `outputs/scenario_results_summary.csv` | Scenario-level mean ± std of final-tick metrics |
 | `outputs/agent_snapshot_final.csv` | Individual agent state at simulation end |
 | `outputs/tick_metrics.csv` | Alias of the long-format metrics file |
+| `outputs/belief_trajectory.csv` | Tick-level BDI belief trajectory diagnostics |
+| `outputs/desire_trajectory.csv` | Tick-level desire strength and conflict diagnostics |
+| `outputs/intention_trajectory.csv` | Tick-level intention distribution trajectory |
+| `outputs/sensitivity_results.csv` | One-factor sensitivity analysis results |
+| `outputs/sensitivity_tornado.png` | Tornado-style chart of scenario-gap sensitivity drivers |
 | `outputs/figures/*.png` | Comparison charts (when `--plot` is passed) |
 
 ---
@@ -184,6 +189,51 @@ python run_experiment.py --use-llm --llm-sample-rate 0.05 --population-size 300 
 - **New metrics:** Add a computation to `compute_metrics()` in `metrics.py` and add the corresponding column to the plotting functions in `plotting.py`.
 - **Different LLM provider:** Change `base_url` and `llm_model` in `ModelConfig`; the client uses the OpenAI SDK interface, so any compatible provider works.
 - **Policy interventions:** Add tick-conditional logic in `model.py`'s `step()` to simulate policy shocks (e.g., housing subsidies reducing `employment_stability_pressure` after tick N).
+
+---
+
+
+## 12A. BDI 认知过程与情景平滑校准
+
+### 1) BDI 如何体现认知过程（而非固定规则）
+
+当前 BDI 已从“机制变量→固定加权→意图”升级为动态认知链条：
+
+- **记忆与平滑更新**：belief 更新使用历史窗口滚动感知信号 + `belief_t = (1-rho)*belief_{t-1} + rho*signal_t`。
+- **认知解释层**：将客观机制变量转为主观判断（经济成家基础、职业轨迹可预测性、关系投入时间）。
+- **愿望冲突保留**：同时保留 marry / delay / career / time-protection 等连续 desire 强度，并输出 `desire_conflict_index`。
+- **有限理性意图选择**：加入 intention inertia、reconsider threshold、decision noise、uncertainty tolerance 与 risk preference。
+- **反馈更新**：`last_decision_outcome` 与 `cognitive_consistency_score` 反向影响后续感知与意图稳定性。
+
+### 2) 为什么不能让 AI 情景直接大幅改变婚育概率
+
+如果直接把 low/medium/high 映射为大幅概率跳变，会把结构性冲击误当成行为参数重写，导致断崖式结果，且难以与经验数据校准。
+
+### 3) 如何控制情景差异（经验基线 + 渐进冲击 + 有界平滑）
+
+- 所有情景共享同一**经验基线分布**（年龄、教育、收入、职业等初始化）。
+- AI 仅作为 baseline 上的**增量 shock**（默认 low=0.00, medium=0.05, high=0.10）。
+- 机制影响采用 **exponential damping + clamp**，避免线性无限放大。
+- 搜索/约会/结婚/生育概率设定了合理上下限，避免高 AI 情景概率塌缩至 0。
+- 机制变量与行为通道采用 `alpha=0.2` 的时间平滑。
+- 跨情景比较采用 common random numbers（相同初始种子序列）。
+- 结果过度偏离时会触发一次 soft calibration，自动下调惩罚参数。
+
+### 4) 如何查看 BDI 轨迹和敏感性分析
+
+运行实验后查看：
+
+- `outputs/belief_trajectory.csv`
+- `outputs/desire_trajectory.csv`
+- `outputs/intention_trajectory.csv`
+- `outputs/sensitivity_results.csv`
+- `outputs/sensitivity_tornado.png`
+
+可据此检查：
+
+- 意图切换是否有惯性、持续期是否合理；
+- 愿望冲突是否随机制冲击动态变化；
+- 哪些参数导致 low/medium/high 差异过大。
 
 ---
 

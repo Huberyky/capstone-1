@@ -16,10 +16,6 @@ from src.enums import (
 from src.utils import clamp
 
 
-# ---------------------------------------------------------------------------
-# BDI state containers
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Beliefs:
     """Subjective perceptions held by an agent (not objective variables)."""
@@ -58,7 +54,7 @@ class IntentionState:
     """Current intention and its associated metadata."""
 
     current_intention: Optional[Intention] = None
-    intention_duration: int = 0          # ticks since intention was set
+    intention_duration: int = 0
     commitment_strength: float = 0.5
     intention_score: float = 0.0
 
@@ -73,42 +69,30 @@ class LLMState:
     birth_willingness: float = 0.5
     fertility_intention: float = 0.5
     llm_reason: str = ""
-    last_llm_tick: int = -999   # tick at which LLM was last called
+    last_llm_tick: int = -999
 
-
-# ---------------------------------------------------------------------------
-# Main agent class
-# ---------------------------------------------------------------------------
 
 @dataclass
 class YouthAgent:
-    """Represents a single young adult in the simulation.
+    """Represents a single young adult in the simulation."""
 
-    Parameters are set at initialisation by the model; all variables are
-    updated each tick according to the environment, BDI engine, and
-    matching / fertility modules.
-    """
-
-    # --- identity ---
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     sex: Sex = Sex.MALE
-    age_ticks: int = 72        # default 18 years × 4 ticks/year
+    age_ticks: int = 72
     education: EducationLevel = EducationLevel.MEDIUM
-    income: float = 0.4        # normalised 0–1
+    income: float = 0.4
     occupation: str = "general"
-    ai_exposure: float = 0.3   # individual-level AI exposure (0–1)
-    school_status: bool = False  # True while in school
+    ai_exposure: float = 0.3
+    school_status: bool = False
     alive: bool = True
 
-    # --- relationship state ---
     relationship_status: RelationshipStatus = RelationshipStatus.SINGLE
     partner_id: Optional[str] = None
-    relationship_duration: int = 0   # ticks in current relationship
+    relationship_duration: int = 0
     num_children: int = 0
     first_marriage_age: Optional[float] = None
     first_birth_age: Optional[float] = None
 
-    # --- labour situation variables (updated each tick) ---
     task_restructuring_exposure: float = 0.2
     entry_barrier_level: float = 0.2
     employment_entry_delay: float = 0.1
@@ -120,28 +104,44 @@ class YouthAgent:
     work_life_boundary_blurring: float = 0.2
     available_relationship_time: float = 0.7
 
-    # --- three core mechanism variables ---
     employment_stability_pressure: float = 0.2
     career_expectation_uncertainty: float = 0.2
     relationship_time_compression: float = 0.2
 
-    # --- BDI state ---
     beliefs: Beliefs = field(default_factory=Beliefs)
     desires: Desires = field(default_factory=Desires)
     intention_state: IntentionState = field(default_factory=IntentionState)
-
-    # --- LLM subjective evaluation ---
     llm_state: LLMState = field(default_factory=LLMState)
 
-    # --- internal meta ---
-    belief_sensitivity: float = 0.25  # rho: how fast beliefs update
+    belief_sensitivity: float = 0.25
     prev_employment_stability: float = 0.6
     prev_career_predictability: float = 0.6
 
+    # cognitive process extensions
+    belief_memory: dict[str, list[float]] = field(default_factory=lambda: {
+        "employment_stability_pressure": [],
+        "career_expectation_uncertainty": [],
+        "relationship_time_compression": [],
+    })
+    perceived_trend: float = 0.0
+    uncertainty_tolerance: float = 0.5
+    risk_preference: float = 0.5
+    aspiration_level: float = 0.5
+    decision_noise: float = 0.05
+    last_decision_outcome: float = 0.0
+    cognitive_consistency_score: float = 0.5
+    subjective_interpretation: dict[str, float] = field(default_factory=lambda: {
+        "economic_family_readiness": 0.5,
+        "career_trajectory_predictability": 0.5,
+        "time_for_relationship_investment": 0.5,
+    })
+    desire_conflict_index: float = 0.0
+    intention_switch_count: int = 0
+    intention_duration_history: list[int] = field(default_factory=list)
+
     @property
     def age(self) -> float:
-        """Current age in years (float)."""
-        return self.age_ticks / 4.0   # assuming 4 ticks per year
+        return self.age_ticks / 4.0
 
     @property
     def is_single(self) -> bool:
@@ -156,7 +156,6 @@ class YouthAgent:
         return self.relationship_status == RelationshipStatus.MARRIED
 
     def clamp_all(self) -> None:
-        """Ensure all float fields in [0, 1]."""
         for attr in (
             "income", "ai_exposure",
             "task_restructuring_exposure", "entry_barrier_level",
@@ -167,6 +166,13 @@ class YouthAgent:
             "employment_stability_pressure",
             "career_expectation_uncertainty",
             "relationship_time_compression",
+            "uncertainty_tolerance",
+            "risk_preference",
+            "aspiration_level",
+            "decision_noise",
+            "last_decision_outcome",
+            "cognitive_consistency_score",
+            "desire_conflict_index",
         ):
             setattr(self, attr, clamp(getattr(self, attr)))
 
@@ -178,18 +184,7 @@ def create_agent(
     age_ticks: int,
     ticks_per_year: int = 4,
 ) -> YouthAgent:
-    """Factory function to create a randomly initialised YouthAgent.
-
-    Args:
-        rng: Seeded random number generator.
-        agent_id: Unique agent identifier.
-        sex: Agent sex.
-        age_ticks: Starting age in ticks.
-        ticks_per_year: Ticks per simulation year.
-
-    Returns:
-        A new YouthAgent with randomised baseline attributes.
-    """
+    """Factory function to create a randomly initialised YouthAgent."""
     edu_weights = [0.15, 0.35, 0.35, 0.15]
     education = rng.choices(list(EducationLevel), weights=edu_weights, k=1)[0]
 
@@ -205,9 +200,12 @@ def create_agent(
         income=income,
         ai_exposure=ai_exp,
         belief_sensitivity=belief_sens,
+        uncertainty_tolerance=clamp(rng.gauss(0.5, 0.15)),
+        risk_preference=clamp(rng.gauss(0.5, 0.2)),
+        aspiration_level=clamp(rng.gauss(0.55, 0.15)),
+        decision_noise=clamp(rng.gauss(0.06, 0.02), 0.01, 0.2),
     )
 
-    # School status: agents younger than 22 may still be in school
     age_years = age_ticks / ticks_per_year
     if age_years < 22 and education in (EducationLevel.HIGH, EducationLevel.VERY_HIGH):
         agent.school_status = rng.random() < 0.7

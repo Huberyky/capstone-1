@@ -57,15 +57,19 @@ class MarriageFertilityABM:
         self.scenario = scenario
         self.seed = seed if seed is not None else config.seed
         self.rng = random.Random(self.seed)
+        random.seed(self.seed)
         np.random.seed(self.seed)
 
-        self.bdi = BDIEngine()
+        self.bdi = BDIEngine(config.bdi_intention_factor_strength)
         self.llm_stats = LLMCallStats()
         self.llm_client = DeepSeekClient(config, self.llm_stats)
 
         self.agents: list[YouthAgent] = []
         self.tick_metrics: list[dict] = []
         self.current_tick: int = 0
+        self.belief_trajectory: list[dict] = []
+        self.desire_trajectory: list[dict] = []
+        self.intention_trajectory: list[dict] = []
 
         self._next_id: int = 0
         self._init_population()
@@ -155,7 +159,7 @@ class MarriageFertilityABM:
             # Schooling: agents leave school by age 24
             if agent.age_ticks / tpy >= 24:
                 agent.school_status = False
-            update_labour_situation(agent, self.scenario, tick, tpy)
+            update_labour_situation(agent, self.scenario, tick, self.config, tpy)
 
         # ---- 5–8: BDI cycle ----
         for agent in agents_by_id.values():
@@ -165,6 +169,8 @@ class MarriageFertilityABM:
                 self.bdi.select_intention(agent)
             else:
                 agent.intention_state.intention_duration += 1
+
+        self._record_bdi_diagnostics(list(agents_by_id.values()), tick)
 
         # ---- 9: LLM (sampled) ----
         self._run_llm_step(list(agents_by_id.values()), tick)
@@ -208,7 +214,7 @@ class MarriageFertilityABM:
                 searcher.relationship_status == RelationshipStatus.SINGLE
                 and candidate.relationship_status == RelationshipStatus.SINGLE
             ):
-                llm_w = 0.3 if self.config.use_llm else 0.0
+                llm_w = self.config.llm_weight if self.config.use_llm else 0.0
                 p_i = date_probability(searcher, candidate, self.bdi, llm_w)
                 p_j = date_probability(candidate, searcher, self.bdi, llm_w)
                 if self.rng.random() < p_i and self.rng.random() < p_j:
@@ -283,7 +289,7 @@ class MarriageFertilityABM:
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        llm_w = 0.3 if self.config.use_llm else 0.0
+        llm_w = self.config.llm_weight if self.config.use_llm else 0.0
 
         # Select agents that need an LLM call this tick
         to_call: list[YouthAgent] = []
@@ -365,7 +371,7 @@ class MarriageFertilityABM:
             if partner is None or partner.relationship_status != RelationshipStatus.DATING:
                 continue
 
-            llm_w = 0.3 if self.config.use_llm else 0.0
+            llm_w = self.config.llm_weight if self.config.use_llm else 0.0
             p_i = marry_probability(
                 agent, partner, self.bdi, self.config.beta_commitment, llm_w
             )
@@ -417,7 +423,7 @@ class MarriageFertilityABM:
                 processed.add(male.id)
                 continue
 
-            llm_w = 0.3 if self.config.use_llm else 0.0
+            llm_w = self.config.llm_weight if self.config.use_llm else 0.0
             p_birth = birth_probability(female, male, self.bdi, llm_w, tpy)
 
             if self.rng.random() < p_birth:
@@ -457,6 +463,60 @@ class MarriageFertilityABM:
             )
             self.agents.append(new_agent)
 
+
+    def _record_bdi_diagnostics(self, agents: list[YouthAgent], tick: int) -> None:
+        if not agents:
+            return
+        n = max(len(agents), 1)
+        self.belief_trajectory.append({
+            "tick": tick,
+            "scenario": self.scenario.name,
+            "employment_security": sum(a.beliefs.employment_security for a in agents) / n,
+            "career_predictability": sum(a.beliefs.career_predictability for a in agents) / n,
+            "time_availability": sum(a.beliefs.time_availability for a in agents) / n,
+            "belief_volatility": (
+                sum(abs(a.beliefs.employment_security - a.subjective_interpretation["economic_family_readiness"]) for a in agents)
+                + sum(abs(a.beliefs.career_predictability - a.subjective_interpretation["career_trajectory_predictability"]) for a in agents)
+                + sum(abs(a.beliefs.time_availability - a.subjective_interpretation["time_for_relationship_investment"]) for a in agents)
+            ) / (3 * n),
+        })
+        self.desire_trajectory.append({
+            "tick": tick,
+            "scenario": self.scenario.name,
+            "desire_marry": sum(a.desires.marry for a in agents) / n,
+            "desire_delay_marriage": sum(a.desires.delay_marriage for a in agents) / n,
+            "desire_stabilize_career_entry": sum(a.desires.stabilize_career_entry for a in agents) / n,
+            "desire_protect_personal_time": sum(a.desires.protect_personal_time for a in agents) / n,
+            "desire_conflict_index": sum(a.desire_conflict_index for a in agents) / n,
+        })
+        intention_counts: dict[str, int] = {}
+        for a in agents:
+            key = a.intention_state.current_intention.value if a.intention_state.current_intention else "none"
+            intention_counts[key] = intention_counts.get(key, 0) + 1
+        row = {"tick": tick, "scenario": self.scenario.name}
+        for k, v in intention_counts.items():
+            row[f"share_{k}"] = v / n
+        self.intention_trajectory.append(row)
+
+    def get_bdi_diagnostics_summary(self) -> dict[str, float]:
+        alive = [a for a in self.agents if a.alive]
+        if not alive:
+            return {
+                "intention_switch_count": 0.0,
+                "mean_intention_duration": 0.0,
+                "desire_conflict_index": 0.0,
+                "belief_volatility": 0.0,
+            }
+        durations = [d for a in alive for d in a.intention_duration_history]
+        mean_duration = (sum(durations) / len(durations)) if durations else 0.0
+        belief_vol = sum(abs(a.beliefs.employment_security - a.subjective_interpretation["economic_family_readiness"]) for a in alive) / len(alive)
+        return {
+            "intention_switch_count": float(sum(a.intention_switch_count for a in alive)),
+            "mean_intention_duration": float(mean_duration),
+            "desire_conflict_index": float(sum(a.desire_conflict_index for a in alive) / len(alive)),
+            "belief_volatility": float(belief_vol),
+        }
+
     # -----------------------------------------------------------------------
     # Run full simulation
     # -----------------------------------------------------------------------
@@ -469,6 +529,9 @@ class MarriageFertilityABM:
         """
         for _ in range(self.config.total_ticks):
             self.step()
+
+        if self.tick_metrics:
+            self.tick_metrics[-1].update(self.get_bdi_diagnostics_summary())
 
         if self.config.use_llm:
             print(f"\n[LLM] {self.llm_stats.summary()}")
@@ -501,6 +564,8 @@ class MarriageFertilityABM:
                     ),
                     "marriage_value_score": round(a.llm_state.marriage_value_score, 3),
                     "fertility_value_score": round(a.llm_state.fertility_value_score, 3),
+                    "desire_conflict_index": round(a.desire_conflict_index, 3),
+                    "intention_switch_count": a.intention_switch_count,
                     "scenario": self.scenario.name,
                 }
             )

@@ -137,7 +137,16 @@ def birth_probability(
     bdi_factor = 0.7 * bdi_f + 0.3 * bdi_m
     blended *= bdi_factor
 
-    return clamp(blended)
+    mechanism_penalty = math.exp(
+        -0.50 * couple_esp
+        -0.45 * couple_ceu
+        -0.40 * couple_rtc
+    )
+    mechanism_penalty = clamp(mechanism_penalty, 0.70, 1.05)
+    blended *= mechanism_penalty
+    blended *= 0.85
+
+    return clamp(blended, 0.0001, 0.20)
 
 
 def record_birth(
