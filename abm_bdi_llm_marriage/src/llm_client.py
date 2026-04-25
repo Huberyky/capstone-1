@@ -114,21 +114,33 @@ class DeepSeekClient:
             self._init_client()
 
     def _init_client(self) -> None:
-        """Initialise the openai-compatible client."""
+        """Initialise the openai-compatible client.
+
+        Key resolution order (first non-empty wins):
+        1. config.api_key  — passed via --api-key on the CLI
+        2. DEEPSEEK_API_KEY environment variable
+        3. Falls back to heuristics with a warning
+        """
         try:
             import openai  # type: ignore
 
-            api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+            # Prefer explicitly passed key, then env var
+            api_key = self.config.api_key or os.environ.get("DEEPSEEK_API_KEY", "")
             if not api_key:
                 logger.warning(
-                    "DEEPSEEK_API_KEY not set — LLM calls will fall back to heuristics."
+                    "No API key found (set --api-key or DEEPSEEK_API_KEY) — "
+                    "LLM calls will fall back to heuristics."
                 )
             self._client = openai.OpenAI(
                 api_key=api_key or "sk-dummy",
                 base_url="https://api.deepseek.com",
                 timeout=self.config.llm_timeout,
             )
-            logger.info("DeepSeek client initialised (model=%s)", self.config.llm_model)
+            logger.info(
+                "DeepSeek client initialised (model=%s, key_source=%s)",
+                self.config.llm_model,
+                "cli" if self.config.api_key else "env",
+            )
         except ImportError:
             logger.warning("openai package not installed; falling back to heuristics.")
             self._client = None

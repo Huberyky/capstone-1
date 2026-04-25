@@ -3,11 +3,14 @@
 
 Examples
 --------
-No-LLM mode (default, runs without API key):
+No-LLM mode (default, no API key needed):
     python run_experiment.py --no-llm --population-size 500 --years 30 --replications 5 --plot
 
-Use-LLM mode (requires DEEPSEEK_API_KEY):
-    python run_experiment.py --use-llm --llm-sample-rate 0.05 --population-size 300 --years 20 --replications 2 --plot
+Use-LLM mode — pass key directly on the command line:
+    python run_experiment.py --use-llm --api-key sk-xxxx --population-size 300 --years 20 --plot
+
+Use-LLM mode — read key from DEEPSEEK_API_KEY environment variable:
+    python run_experiment.py --use-llm --llm-sample-rate 0.05 --replications 2 --plot
 """
 
 from __future__ import annotations
@@ -37,13 +40,25 @@ def parse_args() -> argparse.Namespace:
         "--use-llm",
         action="store_true",
         default=False,
-        help="Enable DeepSeek LLM calls (requires DEEPSEEK_API_KEY).",
+        help="Enable DeepSeek LLM calls.",
     )
     llm_group.add_argument(
         "--no-llm",
         action="store_true",
         default=True,
         help="Disable LLM; use heuristic rules only (default).",
+    )
+
+    # API key — can be passed directly instead of via env var
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default="",
+        metavar="SK-XXXX",
+        help=(
+            "DeepSeek API key. Overrides the DEEPSEEK_API_KEY environment variable. "
+            "Example: --use-llm --api-key sk-xxxx"
+        ),
     )
 
     # Simulation parameters
@@ -99,6 +114,18 @@ def main() -> None:
     from src.experiments import run_scenario_experiments
     from src.plotting import plot_all
 
+    # Resolve API key: CLI flag > env var
+    import os
+    api_key = args.api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+
+    # Warn early if LLM mode requested without a key
+    if use_llm and not api_key:
+        print(
+            "[WARNING] --use-llm requested but no API key found.\n"
+            "  Provide one via --api-key sk-xxxx  or  export DEEPSEEK_API_KEY=sk-xxxx\n"
+            "  LLM calls will fall back to heuristics automatically."
+        )
+
     config = ModelConfig(
         population_size=args.population_size,
         years=args.years,
@@ -106,6 +133,7 @@ def main() -> None:
         seed=args.seed,
         replications=args.replications,
         use_llm=use_llm,
+        api_key=api_key,
         llm_sample_rate=args.llm_sample_rate,
         llm_model=args.llm_model,
         llm_temperature=args.llm_temperature,
@@ -113,13 +141,25 @@ def main() -> None:
         output_dir=args.output_dir,
     )
 
+    # Describe key source for clarity
+    if use_llm:
+        if args.api_key:
+            key_desc = "CLI --api-key"
+        elif os.environ.get("DEEPSEEK_API_KEY"):
+            key_desc = "DEEPSEEK_API_KEY env var"
+        else:
+            key_desc = "NONE (will use heuristic fallback)"
+        llm_desc = f"ENABLED (DeepSeek · key: {key_desc})"
+    else:
+        llm_desc = "DISABLED (heuristics only)"
+
     print("=" * 60)
     print(" ABM-BDI-LLM Marriage & Fertility Simulation")
     print("=" * 60)
     print(f"  Population : {config.population_size}")
     print(f"  Years      : {config.years} ({config.total_ticks} ticks)")
     print(f"  Replications: {config.replications}")
-    print(f"  LLM mode   : {'ENABLED (DeepSeek)' if use_llm else 'DISABLED (heuristics)'}")
+    print(f"  LLM mode   : {llm_desc}")
     print(f"  Scenarios  : {args.scenarios}")
     print(f"  Output dir : {config.output_dir}")
     print("=" * 60)

@@ -117,6 +117,8 @@ class ModelConfig:
         sigma_age_pressure_male: Age at which male age-pressure peaks.
         sigma_age_pressure_female: Age at which female age-pressure peaks.
         use_llm: Whether to call the DeepSeek API.
+        api_key: DeepSeek API key. Overrides the DEEPSEEK_API_KEY env variable
+            when provided directly (e.g. via --api-key on the CLI).
         llm_sample_rate: Fraction of agents queried per tick (0-1).
         llm_refresh_interval: Ticks between LLM refreshes for the same agent.
         llm_model: DeepSeek model identifier.
@@ -135,6 +137,7 @@ class ModelConfig:
     sigma_age_pressure_male: float = 30.0
     sigma_age_pressure_female: float = 27.0
     use_llm: bool = False
+    api_key: str = ""          # CLI --api-key takes precedence over env var
     llm_sample_rate: float = 0.05
     llm_refresh_interval: int = 8
     llm_model: str = "deepseek-chat"
