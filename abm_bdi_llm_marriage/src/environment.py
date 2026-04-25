@@ -1,17 +1,8 @@
-"""Environment module: updates agent labour-situation variables each tick.
-
-This implements the causal chain:
-  AI diffusion scenario + individual AI exposure
-  → task restructuring, entry barriers, employment stability, reskilling,
-    monitoring, remote collaboration, work-life blurring
-  → three core mechanism variables:
-      employment_stability_pressure
-      career_expectation_uncertainty
-      relationship_time_compression
-"""
+"""Environment module: updates labour-situation variables each tick."""
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from src.enums import EducationLevel, RelationshipStatus
@@ -19,10 +10,9 @@ from src.utils import clamp
 
 if TYPE_CHECKING:
     from src.agent import YouthAgent
-    from src.config import ScenarioConfig
+    from src.config import ModelConfig, ScenarioConfig
 
 
-# Education level baseline resistance to AI-driven entry barriers
 _EDUCATION_ENTRY_BUFFER: dict[str, float] = {
     EducationLevel.LOW: 0.0,
     EducationLevel.MEDIUM: 0.10,
@@ -30,7 +20,6 @@ _EDUCATION_ENTRY_BUFFER: dict[str, float] = {
     EducationLevel.VERY_HIGH: 0.30,
 }
 
-# Education level reskilling capacity (higher edu → faster adaptation)
 _EDUCATION_RESKILL_CAPACITY: dict[str, float] = {
     EducationLevel.LOW: 0.0,
     EducationLevel.MEDIUM: 0.10,
@@ -39,138 +28,111 @@ _EDUCATION_RESKILL_CAPACITY: dict[str, float] = {
 }
 
 
+def _smooth(current: float, prev: float, alpha: float) -> float:
+    return clamp(alpha * current + (1 - alpha) * prev)
+
+
 def update_labour_situation(
     agent: "YouthAgent",
     scenario: "ScenarioConfig",
     current_tick: int,
+    model_config: "ModelConfig",
     ticks_per_year: int = 4,
 ) -> None:
-    """Recompute all labour-situation variables and mechanism variables for one tick.
-
-    The update follows a sequential causal logic:
-    1. Task restructuring exposure
-    2. Entry barrier level
-    3. Employment entry delay
-    4. Employment stability
-    5. Reskilling need
-    6. Career predictability
-    7. Monitoring intensity
-    8. Remote collaboration intensity
-    9. Work-life boundary blurring
-    10. Available relationship time
-    11. Three mechanism variables
-
-    Args:
-        agent: The agent to update.
-        scenario: Current AI scenario config.
-        current_tick: Global tick counter.
-        ticks_per_year: Ticks per simulated year.
-    """
+    """Recompute all labour variables from empirical baseline + bounded AI increments."""
+    alpha = model_config.smoothing_alpha
     ai = agent.ai_exposure
     edu = agent.education.value if hasattr(agent.education, "value") else agent.education
 
-    # Store previous values for BDI change detection
     agent.prev_employment_stability = agent.employment_stability
     agent.prev_career_predictability = agent.career_predictability
 
-    # ---- 1. Task restructuring exposure ----
-    # How much AI has restructured this person's job tasks
-    task_rest = clamp(ai * scenario.task_restructuring_multiplier)
-    agent.task_restructuring_exposure = task_rest
+    # empirical baseline (common across scenarios)
+    baseline_task_rest = clamp(ai * 0.28)
+    baseline_entry_bar = clamp(ai * 0.22 - _EDUCATION_ENTRY_BUFFER.get(edu, 0.0))
+    baseline_reskill = clamp(ai * 0.25 - _EDUCATION_RESKILL_CAPACITY.get(edu, 0.0) * 0.5)
+    baseline_monitoring = clamp(ai * 0.22)
+    baseline_remote = clamp(ai * 0.22)
 
-    # ---- 2. Entry barrier level ----
-    # Education partially buffers entry barriers
-    edu_buffer = _EDUCATION_ENTRY_BUFFER.get(edu, 0.0)
-    entry_bar = clamp(
-        ai * scenario.entry_barrier_multiplier - edu_buffer
-    )
-    agent.entry_barrier_level = entry_bar
+    # incremental scenario shock only
+    shock = scenario.scenario_shock_size
+    task_rest_raw = clamp(baseline_task_rest * (1 + shock * scenario.task_restructuring_multiplier))
+    entry_bar_raw = clamp(baseline_entry_bar * (1 + shock * scenario.entry_barrier_multiplier))
 
-    # ---- 3. Employment entry delay ----
-    # Young agents in high-barrier environments face longer school-to-work transitions
     age_years = agent.age_ticks / ticks_per_year
     youth_factor = clamp(1.0 - (age_years - 18.0) / 12.0) if age_years < 30 else 0.0
-    entry_delay = clamp(
-        (0.4 * task_rest + 0.4 * entry_bar + 0.2 * youth_factor) * 0.9
+    entry_delay_raw = clamp((0.4 * task_rest_raw + 0.4 * entry_bar_raw + 0.2 * youth_factor) * 0.75)
+
+    stab_raw = clamp(
+        agent.income * 0.50
+        + (1.0 - entry_delay_raw) * 0.30
+        - entry_bar_raw * 0.22
+        + scenario.positive_productivity_effect * 0.20
     )
-    agent.employment_entry_delay = entry_delay
 
-    # ---- 4. Employment stability ----
-    # Income provides stability; entry delay and scenario multiplier erode it
-    stab = clamp(
-        agent.income * 0.5
-        + (1.0 - entry_delay) * 0.3
-        - entry_bar * scenario.employment_stability_multiplier * 0.4
-        + scenario.positive_productivity_effect * 0.2
+    reskill_raw = clamp(baseline_reskill * (1 + shock * scenario.reskilling_multiplier))
+    career_pred_raw = clamp((1.0 - reskill_raw) * 0.45 + (1.0 - task_rest_raw) * 0.25 + stab_raw * 0.30)
+
+    monitoring_raw = clamp(baseline_monitoring * (1 + shock * scenario.monitoring_multiplier))
+    remote_raw = clamp(baseline_remote * (1 + shock * scenario.remote_collaboration_multiplier))
+
+    wlb_raw = clamp(
+        (monitoring_raw * 0.35 + remote_raw * 0.35) * (0.60 + 0.40 * scenario.work_life_blurring_multiplier)
+        + monitoring_raw * 0.12 + remote_raw * 0.12
     )
-    agent.employment_stability = stab
 
-    # ---- 5. Reskilling need ----
-    reskill_cap = _EDUCATION_RESKILL_CAPACITY.get(edu, 0.0)
-    reskill = clamp(
-        ai * scenario.reskilling_multiplier - reskill_cap * 0.5
-    )
-    agent.reskilling_need = reskill
-
-    # ---- 6. Career predictability ----
-    career_pred = clamp(
-        (1.0 - reskill) * 0.4
-        + (1.0 - task_rest) * 0.3
-        + stab * 0.3
-    )
-    agent.career_predictability = career_pred
-
-    # ---- 7. Monitoring intensity ----
-    monitoring = clamp(ai * scenario.monitoring_multiplier)
-    agent.monitoring_intensity = monitoring
-
-    # ---- 8. Remote collaboration intensity ----
-    remote = clamp(ai * scenario.remote_collaboration_multiplier)
-    agent.remote_collaboration_intensity = remote
-
-    # ---- 9. Work-life boundary blurring ----
-    wlb = clamp(
-        (monitoring * 0.4 + remote * 0.4)
-        * scenario.work_life_blurring_multiplier
-        + monitoring * 0.1
-        + remote * 0.1
-    )
-    agent.work_life_boundary_blurring = wlb
-
-    # ---- 10. Available relationship time ----
-    # Being in a relationship slightly increases motivation to protect time
     rel_bonus = 0.05 if agent.relationship_status != RelationshipStatus.SINGLE else 0.0
-    avail_time = clamp(
-        1.0 - wlb * 0.5 - monitoring * 0.3 + rel_bonus
-    )
-    agent.available_relationship_time = avail_time
+    avail_time_raw = clamp(1.0 - wlb_raw * 0.45 - monitoring_raw * 0.25 + rel_bonus)
 
-    # ---- 11. Three mechanism variables ----
+    # time smoothing for labour variables
+    agent.task_restructuring_exposure = _smooth(task_rest_raw, agent.task_restructuring_exposure, alpha)
+    agent.entry_barrier_level = _smooth(entry_bar_raw, agent.entry_barrier_level, alpha)
+    agent.employment_entry_delay = _smooth(entry_delay_raw, agent.employment_entry_delay, alpha)
+    agent.employment_stability = _smooth(stab_raw, agent.employment_stability, alpha)
+    agent.reskilling_need = _smooth(reskill_raw, agent.reskilling_need, alpha)
+    agent.career_predictability = _smooth(career_pred_raw, agent.career_predictability, alpha)
+    agent.monitoring_intensity = _smooth(monitoring_raw, agent.monitoring_intensity, alpha)
+    agent.remote_collaboration_intensity = _smooth(remote_raw, agent.remote_collaboration_intensity, alpha)
+    agent.work_life_boundary_blurring = _smooth(wlb_raw, agent.work_life_boundary_blurring, alpha)
+    agent.available_relationship_time = _smooth(avail_time_raw, agent.available_relationship_time, alpha)
 
-    # Mechanism 1: employment stability pressure
-    # Captures how difficult stable career entry is
-    agent.employment_stability_pressure = clamp(
-        entry_delay * 0.30
-        + (1.0 - stab) * 0.30
-        + task_rest * 0.20
-        + entry_bar * 0.20
+    # bounded transformation for mechanism penalty (damping)
+    mechanism_penalty = math.exp(
+        -model_config.lambda_employment * agent.entry_barrier_level
+        -model_config.lambda_career_uncertainty * (1.0 - agent.career_predictability)
+        -model_config.lambda_time_compression * agent.work_life_boundary_blurring
+    )
+    mechanism_penalty = clamp(
+        mechanism_penalty,
+        model_config.mechanism_penalty_min,
+        model_config.mechanism_penalty_max,
     )
 
-    # Mechanism 2: career expectation uncertainty
-    # Captures unpredictability of future career path
-    agent.career_expectation_uncertainty = clamp(
-        reskill * 0.40
-        + (1.0 - career_pred) * 0.40
-        + ai * 0.20
+    esp_raw = clamp(
+        0.28 * agent.employment_entry_delay
+        + 0.30 * (1.0 - agent.employment_stability)
+        + 0.22 * agent.task_restructuring_exposure
+        + 0.20 * agent.entry_barrier_level
+    )
+    ceu_raw = clamp(
+        0.36 * agent.reskilling_need
+        + 0.40 * (1.0 - agent.career_predictability)
+        + 0.24 * ai
+    )
+    rtc_raw = clamp(
+        0.33 * agent.work_life_boundary_blurring
+        + 0.28 * agent.monitoring_intensity
+        + 0.20 * agent.remote_collaboration_intensity
+        + 0.19 * (1.0 - agent.available_relationship_time)
     )
 
-    # Mechanism 3: relationship time compression
-    # Captures shrinking of private / relational time
-    agent.relationship_time_compression = clamp(
-        wlb * 0.35
-        + monitoring * 0.30
-        + remote * 0.20
-        + (1.0 - avail_time) * 0.15
-    )
+    # damp mechanism shocks to avoid cliff effects
+    esp_raw = clamp(esp_raw * (1.08 - mechanism_penalty))
+    ceu_raw = clamp(ceu_raw * (1.08 - mechanism_penalty))
+    rtc_raw = clamp(rtc_raw * (1.08 - mechanism_penalty))
+
+    agent.employment_stability_pressure = _smooth(esp_raw, agent.employment_stability_pressure, alpha)
+    agent.career_expectation_uncertainty = _smooth(ceu_raw, agent.career_expectation_uncertainty, alpha)
+    agent.relationship_time_compression = _smooth(rtc_raw, agent.relationship_time_compression, alpha)
 
     agent.clamp_all()

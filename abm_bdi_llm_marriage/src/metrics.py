@@ -154,6 +154,14 @@ def compute_metrics(
     metrics["share_intention_reduce_career_uncertainty"] = intention_counts.get("reduce_career_uncertainty", 0) / n_alive
     metrics["share_intention_protect_personal_time"] = intention_counts.get("protect_personal_time", 0) / n_alive
 
+
+    metrics["mean_desire_conflict_index"] = (
+        sum(a.desire_conflict_index for a in alive) / max(len(alive), 1)
+    )
+    metrics["mean_cognitive_consistency_score"] = (
+        sum(a.cognitive_consistency_score for a in alive) / max(len(alive), 1)
+    )
+
     # ---- LLM call statistics ----
     metrics["llm_call_count"] = float(llm_stats.call_count)
     metrics["llm_cache_hit_count"] = float(llm_stats.cache_hit_count)
