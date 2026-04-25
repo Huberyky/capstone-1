@@ -275,19 +275,42 @@ class MarriageFertilityABM:
         agents: list[YouthAgent],
         tick: int,
     ) -> None:
-        """Sample agents and call LLM (or fallback) to update subjective values."""
+        """Sample agents and call LLM (or fallback) to update subjective values.
+
+        API calls are dispatched concurrently via ThreadPoolExecutor so that
+        network latency for one agent does not block others.  The number of
+        worker threads is capped at 8 to avoid flooding the rate limiter.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        llm_w = 0.3 if self.config.use_llm else 0.0
+
+        # Select agents that need an LLM call this tick
+        to_call: list[YouthAgent] = []
         for agent in agents:
-            # Only call LLM at refresh interval or first time
             since_last = tick - agent.llm_state.last_llm_tick
             if since_last < self.config.llm_refresh_interval:
                 continue
-            # Sample rate gate
             if self.rng.random() > self.config.llm_sample_rate:
                 continue
+            to_call.append(agent)
 
-            result = self.llm_client.call(agent, self.scenario, tick)
-            llm_w = 0.3 if self.config.use_llm else 0.0
-            self.llm_client.apply_to_agent(agent, result, llm_w)
+        if to_call:
+            # Concurrent API calls — each thread handles one agent
+            max_workers = min(8, len(to_call))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_agent = {
+                    pool.submit(self.llm_client.call, agent, self.scenario, tick): agent
+                    for agent in to_call
+                }
+                for future in as_completed(future_to_agent):
+                    agent = future_to_agent[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        logger.warning("LLM future failed for agent %s: %s", agent.id, exc)
+                        result = self.llm_client.fallback_decision(agent)
+                    self.llm_client.apply_to_agent(agent, result, llm_w)
 
         # Always run fallback for agents that have never been evaluated
         for agent in agents:
